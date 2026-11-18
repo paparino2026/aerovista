@@ -1,0 +1,561 @@
+import 'dart:ui' show PointerDeviceKind;
+import 'package:flutter/material.dart';
+import 'package:aerovista/controller.dart';
+import 'package:aerovista/model.dart';
+import 'package:aerovista/theme.dart';
+import 'package:aerovista/ui/controls.dart';
+import 'package:aerovista/ui/map.dart';
+import 'package:aerovista/ui/painters.dart';
+import 'package:aerovista/ui/panels.dart';
+
+void main() => runApp(const AeroVistaApp());
+
+class AeroVistaApp extends StatefulWidget {
+  const AeroVistaApp({super.key});
+  @override
+  State<AeroVistaApp> createState() => _AeroVistaAppState();
+}
+
+class _AeroVistaAppState extends State<AeroVistaApp> {
+  final RadarController _c = RadarController();
+  int _theme = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _c.addListener(_onTheme);
+    _c.init();
+  }
+
+  void _onTheme() {
+    if (_c.themeIndex != _theme && mounted) setState(() => _theme = _c.themeIndex);
+  }
+
+  @override
+  void dispose() {
+    _c.removeListener(_onTheme);
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return RadarScope(
+      controller: _c,
+      child: MaterialApp(
+        title: 'AeroVista',
+        debugShowCheckedModeBanner: false,
+        theme: avTheme(kPalettes[_theme]),
+        scrollBehavior: const MaterialScrollBehavior().copyWith(
+          dragDevices: {
+            PointerDeviceKind.touch,
+            PointerDeviceKind.mouse,
+            PointerDeviceKind.trackpad,
+            PointerDeviceKind.stylus,
+          },
+        ),
+        home: const RootShell(),
+      ),
+    );
+  }
+}
+
+enum _Panel { traffic, detail }
+
+class RootShell extends StatefulWidget {
+  const RootShell({super.key});
+  @override
+  State<RootShell> createState() => _RootShellState();
+}
+
+class _RootShellState extends State<RootShell> {
+  _Panel _panel = _Panel.traffic;
+  bool _open = false;
+  bool _dockExpanded = false;
+  String? _lastSel;
+  RadarController? _c;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final c = RadarScope.of(context);
+    if (!identical(c, _c)) {
+      _c?.removeListener(_onController);
+      _c = c;
+      c.addListener(_onController);
+    }
+  }
+
+  void _onController() {
+    final c = _c;
+    if (c == null || !mounted) return;
+    if (c.selectedHex != _lastSel) {
+      _lastSel = c.selectedHex;
+      final wide = MediaQuery.sizeOf(context).width >= 1020;
+      if (!wide) {
+        setState(() {
+          if (c.selectedHex == null) {
+            if (_panel == _Panel.detail) _open = false;
+          } else {
+            _panel = _Panel.detail;
+            _open = true;
+            _dockExpanded = false;
+          }
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _c?.removeListener(_onController);
+    super.dispose();
+  }
+
+  void _toggle(_Panel p) {
+    setState(() {
+      if (_panel == p && _open) {
+        _open = false;
+      } else {
+        _panel = p;
+        _open = true;
+        _dockExpanded = false;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = RadarScope.of(context);
+    final p = c.palette;
+    return Scaffold(
+      resizeToAvoidBottomInset: false,
+      backgroundColor: p.bg,
+      body: LayoutBuilder(
+        builder: (context, box) {
+          final wide = box.maxWidth >= 1020;
+          return Stack(
+            children: [
+              Positioned.fill(child: wide ? _desktop(c, p, box) : _mobile(c, p, box)),
+              if (c.booting) const Positioned.fill(child: _Boot()),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _mapColumn(RadarController c, Palette p) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+          child: Column(
+            children: [
+              const StatsStrip(),
+              if (c.alerts.isNotEmpty) ...[const SizedBox(height: 8), const AlertBanner()],
+              if (c.feedError != null) ...[const SizedBox(height: 8), const FeedError()],
+            ],
+          ),
+        ),
+        const SizedBox(height: 10),
+        Expanded(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Container(
+                decoration: BoxDecoration(border: Border.all(color: p.line)),
+                child: const RadarMap(),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _desktop(RadarController c, Palette p, BoxConstraints box) {
+    final w = box.maxWidth;
+    final leftW = w >= 1400 ? 366.0 : 320.0;
+    final dockH = clampD(box.maxHeight * .44, 240, 400);
+    final inline = c.selected != null && w >= 1280;
+    final overlay = c.selected != null && w < 1280;
+
+    return Column(
+      children: [
+        const TopBar(),
+        Expanded(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: leftW,
+                      child: Column(
+                        children: [
+                          Expanded(child: TrafficPanel(onPick: (_) {})),
+                          SizedBox(
+                            height: dockH,
+                            child: ControlDock(expanded: true, onExport: () => openExport(context)),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Container(width: 1, color: p.line),
+                    Expanded(child: _mapColumn(c, p)),
+                    if (inline) ...[
+                      Container(width: 1, color: p.line),
+                      const SizedBox(width: 384, child: DetailDrawer()),
+                    ],
+                  ],
+                ),
+              ),
+              if (overlay)
+                Positioned(
+                  right: 16,
+                  top: 16,
+                  bottom: 16,
+                  width: 350,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(16),
+                    child: Container(
+                      decoration: BoxDecoration(
+                        border: Border.all(color: p.primary.withOpacity(.45)),
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [BoxShadow(color: p.scrim.withOpacity(.7), blurRadius: 28)],
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: const DetailDrawer(),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _mobile(RadarController c, Palette p, BoxConstraints box) {
+    final topPad = MediaQuery.paddingOf(context).top;
+    final bottomPad = MediaQuery.paddingOf(context).bottom;
+    final topH = topPad + 56;
+    final stackH = 78 + (c.alerts.isNotEmpty ? 44 : 0) + (c.feedError != null ? 44 : 0);
+    final dockH = _dockExpanded ? clampD(box.maxHeight * .54, 300, 440) : 96 + bottomPad;
+    final panelH = clampD(box.maxHeight * .46, 240, 420);
+
+    return Stack(
+      children: [
+        Positioned.fill(child: RadarMap(topInset: topH + stackH + 6, bottomInset: dockH + 6)),
+        Positioned(top: 0, left: 0, right: 0, child: TopBar(onTraffic: () => _toggle(_Panel.traffic))),
+        Positioned(
+          top: topH + 6,
+          left: 10,
+          right: 10,
+          child: Column(
+            children: [
+              const StatsStrip(compact: true),
+              if (c.alerts.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                AlertBanner(onShow: () => _toggle(_Panel.detail)),
+              ],
+              if (c.feedError != null) ...[const SizedBox(height: 6), const FeedError()],
+            ],
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: dockH,
+          height: panelH,
+          child: IgnorePointer(
+            ignoring: !_open,
+            child: AnimatedOpacity(
+              opacity: _open ? 1 : 0,
+              duration: const Duration(milliseconds: 200),
+              child: AnimatedSlide(
+                offset: _open ? Offset.zero : const Offset(0, .07),
+                duration: const Duration(milliseconds: 280),
+                curve: Curves.easeOutCubic,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: p.surface,
+                    borderRadius: const BorderRadius.vertical(top: Radius.circular(18)),
+                    border: Border(top: BorderSide(color: p.primary.withOpacity(.4))),
+                    boxShadow: [BoxShadow(color: p.scrim.withOpacity(.6), blurRadius: 22, offset: const Offset(0, -6))],
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: _panel == _Panel.traffic
+                      ? TrafficPanel(
+                          onClose: () => setState(() => _open = false),
+                          onPick: (_) => setState(() => _panel = _Panel.detail),
+                        )
+                      : DetailDrawer(onClose: () => setState(() => _open = false)),
+                ),
+              ),
+            ),
+          ),
+        ),
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          height: dockH,
+          child: ControlDock(
+            expanded: _dockExpanded,
+            compactMode: true,
+            onToggleExpanded: () => setState(() {
+              _dockExpanded = !_dockExpanded;
+              if (_dockExpanded) _open = false;
+            }),
+            onExport: () => openExport(context),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class FeedError extends StatelessWidget {
+  const FeedError({super.key});
+  @override
+  Widget build(BuildContext context) {
+    final c = RadarScope.of(context);
+    final p = c.palette;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      decoration: BoxDecoration(
+        color: p.amber.withOpacity(.12),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: p.amber.withOpacity(.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.cloud_off, size: 14, color: p.amber),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(c.feedError ?? '',
+                style: AvText.body(p, size: 11, color: p.text), overflow: TextOverflow.ellipsis),
+          ),
+          AvButton(label: 'RIPROVA', dense: true, tone: p.amber, onTap: c.retryLive),
+        ],
+      ),
+    );
+  }
+}
+
+class TopBar extends StatelessWidget {
+  const TopBar({super.key, this.onTraffic});
+  final VoidCallback? onTraffic;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = RadarScope.of(context);
+    final p = c.palette;
+    final live = c.mode == FeedMode.live;
+    final col = live ? p.primary : p.amber;
+    final compact = onTraffic != null;
+
+    return Container(
+      padding: EdgeInsets.only(top: MediaQuery.paddingOf(context).top),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [p.surface, p.surfaceHi, p.surface],
+        ),
+        border: Border(bottom: BorderSide(color: p.line)),
+      ),
+      child: SizedBox(
+        height: 56,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              SizedBox(width: 28, height: 28, child: CustomPaint(painter: LogoPainter(p))),
+              const SizedBox(width: 9),
+              Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('AEROVISTA', style: AvText.display(p, size: 15, ls: 1.2)),
+                  Text('RADAR ADS-B PERSONALE', style: AvText.label(p, size: 7)),
+                ],
+              ),
+              const SizedBox(width: 12),
+              if (!compact)
+                Expanded(
+                  child: Row(
+                    children: [
+                      Icon(Icons.place_outlined, size: 13, color: p.cyan),
+                      const SizedBox(width: 5),
+                      Flexible(
+                        child: Text(c.hubName,
+                            style: AvText.mono(p, size: 11.5, color: p.muted),
+                            overflow: TextOverflow.ellipsis),
+                      ),
+                      const SizedBox(width: 12),
+                      Flexible(
+                        child: Text(
+                          live ? '${c.source} · ${agoLabel(c.lastUpdate)}' : 'simulazione locale',
+                          style: AvText.mono(p, size: 10.5, color: p.dim),
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      if (c.polling) ...[
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          width: 10,
+                          height: 10,
+                          child: CircularProgressIndicator(strokeWidth: 1.4, color: p.primary),
+                        ),
+                      ],
+                    ],
+                  ),
+                )
+              else
+                const Spacer(),
+              GestureDetector(
+                onTap: () => c.setLive(!c.liveRequested),
+                child: Tooltip(
+                  message: live ? 'Feed live attivo — tocca per la demo' : 'Demo locale — tocca per il live',
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: col.withOpacity(.14),
+                      borderRadius: BorderRadius.circular(9),
+                      border: Border.all(color: col.withOpacity(.6)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 7,
+                          height: 7,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: col,
+                            boxShadow: [BoxShadow(color: col.withOpacity(.8), blurRadius: 7)],
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(live ? 'LIVE' : 'DEMO', style: AvText.label(p, size: 9, color: col)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 7),
+              if (compact)
+                AvButton(label: '${c.stats.count}', icon: Icons.list_alt, dense: true, onTap: onTraffic!)
+              else ...[
+                AvIconBtn(
+                  icon: Icons.star,
+                  tone: c.filter == TrafficFilter.favorites ? p.amber : p.muted,
+                  active: c.filter == TrafficFilter.favorites,
+                  tooltip: 'Solo preferiti (${c.favorites.length})',
+                  onTap: () => c.setFilter(
+                    c.filter == TrafficFilter.favorites ? TrafficFilter.all : TrafficFilter.favorites,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                AvIconBtn(icon: Icons.download, tooltip: 'Esporta', onTap: () => openExport(context)),
+              ],
+              const SizedBox(width: 6),
+              AvIconBtn(icon: Icons.bookmarks_outlined, tooltip: 'Viste salvate', onTap: () => openViews(context)),
+              const SizedBox(width: 6),
+              AvIconBtn(icon: Icons.info_outline, tooltip: 'Info e fonti', onTap: () => openAbout(context)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Boot extends StatefulWidget {
+  const _Boot();
+  @override
+  State<_Boot> createState() => _BootState();
+}
+
+class _BootState extends State<_Boot> with SingleTickerProviderStateMixin {
+  late final AnimationController _a;
+
+  @override
+  void initState() {
+    super.initState();
+    _a = AnimationController(vsync: this, duration: const Duration(milliseconds: 1500))..forward();
+  }
+
+  @override
+  void dispose() {
+    _a.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = RadarScope.of(context);
+    final p = c.palette;
+    return AnimatedBuilder(
+      animation: _a,
+      builder: (_, __) {
+        final t = _a.value;
+        final fade = t > .82 ? (1 - (t - .82) / .18) : 1.0;
+        return IgnorePointer(
+          ignoring: t > .82,
+          child: Opacity(
+            opacity: clampD(fade, 0, 1),
+            child: Container(
+              color: p.bg,
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    SizedBox(
+                      width: 96,
+                      height: 96,
+                      child: Transform.rotate(
+                        angle: t * 6.283 * 1.6,
+                        child: CustomPaint(painter: LogoPainter(p)),
+                      ),
+                    ),
+                    const SizedBox(height: 22),
+                    Opacity(
+                      opacity: clampD(t * 3, 0, 1),
+                      child: Text('AEROVISTA', style: AvText.display(p, size: 26, ls: 4)),
+                    ),
+                    const SizedBox(height: 8),
+                    Opacity(
+                      opacity: clampD((t - .2) * 3, 0, 1),
+                      child: Text('ACQUISIZIONE SEGNALE ADS-B · 1090 MHz',
+                          style: AvText.label(p, size: 9.5, color: p.primary)),
+                    ),
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: 210,
+                      height: 3,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(2),
+                        child: LinearProgressIndicator(value: t, backgroundColor: p.line, color: p.primary),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Opacity(
+                      opacity: clampD((t - .45) * 3, 0, 1),
+                      child: Text('${c.fleet.length} tracce inizializzate · hub ${c.hubName}',
+                          style: AvText.mono(p, size: 10, color: p.dim)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
